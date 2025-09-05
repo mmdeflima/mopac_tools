@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visualizador Interativo MOPAC</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            background-color: #f0f2f5;
+            color: #1c1e21;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .app-container {
+            width: 100%;
+            max-width: 900px;
+            background-color: #ffffff;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            padding: 24px;
+            box-sizing: border-box;
+        }
+        header {
+            text-align: center;
+            border-bottom: 1px solid #dddfe2;
+            padding-bottom: 16px;
+            margin-bottom: 24px;
+        }
+        h1 {
+            color: #0d6efd;
+            margin: 0;
+            font-size: 2em;
+        }
+        p {
+            margin: 8px 0 0;
+            color: #606770;
+        }
+        .controls {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        #fileInput {
+            display: none;
+        }
+        .file-label {
+            background-color: #0d6efd;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background-color 0.2s;
+        }
+        .file-label:hover {
+            background-color: #0b5ed7;
+        }
+        #fileName {
+            color: #606770;
+            font-style: italic;
+        }
+        #status {
+            text-align: center;
+            min-height: 20px;
+            font-weight: bold;
+            margin-bottom: 16px;
+        }
+        .error { color: #d9534f; }
+        .success { color: #5cb85c; }
+        #viewerContainer {
+            width: 100%;
+            height: 500px;
+            position: relative;
+            background-color: #e9ecef;
+            border-radius: 8px;
+            border: 1px solid #dddfe2;
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <h1>Visualizador Interativo MOPAC</h1>
+            <p>Carregue um arquivo <strong>.out</strong> para visualizar a molécula e suas cargas de Mulliken.</p>
+        </header>
+
+        <main>
+            <div class="controls">
+                <label for="fileInput" class="file-label">Escolher Arquivo</label>
+                <input type="file" id="fileInput" accept=".out,.mop">
+                <span id="fileName">Nenhum arquivo selecionado</span>
+            </div>
+            <div id="status"></div>
+            <div id="viewerContainer"></div>
+        </main>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.1.0/3Dmol-min.js"></script>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const fileInput = document.getElementById('fileInput');
+            const fileNameSpan = document.getElementById('fileName');
+            const statusDiv = document.getElementById('status');
+            const viewerContainer = document.getElementById('viewerContainer');
+            let viewer = null;
+
+            fileInput.addEventListener('change', handleFileSelect);
+
+            function handleFileSelect(event) {
+                const file = event.target.files[0];
+                if (!file) {
+                    fileNameSpan.textContent = 'Nenhum arquivo selecionado';
+                    return;
+                }
+                fileNameSpan.textContent = file.name;
+                statusDiv.textContent = 'Lendo arquivo...';
+                statusDiv.className = '';
+
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    try {
+                        const content = e.target.result;
+                        const data = parseMopacOutput(content);
+                        statusDiv.textContent = 'Molécula processada com sucesso!';
+                        statusDiv.className = 'success';
+                        displayMolecule(data);
+                    } catch (error) {
+                        statusDiv.textContent = `Erro: ${error.message}`;
+                        statusDiv.className = 'error';
+                        clearViewer();
+                    }
+                };
+                reader.onerror = function() {
+                    statusDiv.textContent = 'Erro ao ler o arquivo.';
+                    statusDiv.className = 'error';
+                    clearViewer();
+                };
+                reader.readAsText(file);
+            }
+
+            function parseMopacOutput(content) {
+                // Regex para o bloco "CARTESIAN COORDINATES" (mais limpo)
+                const altGeometryRegex = /CARTESIAN COORDINATES\s*\n\n([\s\S]+?)(?=\n\n\s*Empirical Formula)/;
+                // Regex para o bloco com otimização '*'
+                const geometryRegex = /FINAL HEAT OF FORMATION =[\s\S]*?NUMBER\s+SYMBOL\s+\(ANGSTROMS\)\s+\(ANGSTROMS\)\s+\(ANGSTROMS\)\s*\n([\s\S]*?)(?=\n\s*CARTESIAN COORDINATES|\n\n)/;
+
+                let geometryMatch = content.match(altGeometryRegex); // Prioriza o bloco limpo
+                let isCleanFormat = true;
+                
+                if (!geometryMatch || !geometryMatch[1]) {
+                    geometryMatch = content.match(geometryRegex); // Fallback para o bloco com '*'
+                    isCleanFormat = false;
+                }
+
+                if (!geometryMatch || !geometryMatch[1]) {
+                    throw new Error('Geometria final não encontrada no arquivo.');
+                }
+                const geometryBlock = geometryMatch[1].trim();
+
+                // Regex para encontrar as cargas de Mulliken
+                const mullikenRegex = /MULLIKEN POPULATIONS AND CHARGES\s*NO\.\s+ATOM\s+POPULATION\s+CHARGE\s*([\s\S]*?)(?=\n\n|\s*\*+)/;
+                const mullikenMatch = content.match(mullikenRegex);
+                if (!mullikenMatch || !mullikenMatch[1]) {
+                    throw new Error('Cargas de Mulliken não encontradas no arquivo.');
+                }
+                const mullikenBlock = mullikenMatch[1].trim();
+                
+                const atoms = [];
+                const geometryLines = geometryBlock.split('\n');
+                for (const line of geometryLines) {
+                    if (!line.trim()) continue; // Ignora linhas em branco
+                    const parts = line.trim().split(/\s+/);
+                    
+                    if (isCleanFormat) {
+                        // Formato limpo: 1 C -3.5 0.4 -0.0
+                        if (parts.length >= 5) {
+                            atoms.push({
+                                symbol: parts[1],
+                                x: parseFloat(parts[2]),
+                                y: parseFloat(parts[3]),
+                                z: parseFloat(parts[4]),
+                                charge: 0
+                            });
+                        }
+                    } else {
+                        // Formato com '*': 1 C -3.5 * 0.4 * -0.0 *
+                        if (parts.length >= 8) {
+                             atoms.push({
+                                symbol: parts[1],
+                                x: parseFloat(parts[2]),
+                                y: parseFloat(parts[4]),
+                                z: parseFloat(parts[6]),
+                                charge: 0
+                            });
+                        }
+                    }
+                }
+
+                const mullikenLines = mullikenBlock.split('\n');
+                if (atoms.length !== mullikenLines.length) {
+                    throw new Error('Número de átomos na geometria e nas cargas não coincide.');
+                }
+
+                for (let i = 0; i < mullikenLines.length; i++) {
+                    const parts = mullikenLines[i].trim().split(/\s+/);
+                    if (parts.length >= 4) {
+                        atoms[i].charge = parseFloat(parts[3]);
+                    }
+                }
+                
+                return atoms;
+            }
+            
+            function clearViewer() {
+                viewerContainer.innerHTML = '';
+                viewer = null;
+            }
+
+            function displayMolecule(atoms) {
+                clearViewer();
+
+                viewerContainer.style.height = '500px';
+                viewerContainer.style.backgroundColor = '#e9ecef';
+                viewerContainer.style.border = '1px solid #dddfe2';
+                
+                let xyz_data = `${atoms.length}\nGerado pelo Visualizador Interativo MOPAC\n`;
+                atoms.forEach(atom => {
+                    xyz_data += `${atom.symbol} ${atom.x} ${atom.y} ${atom.z}\n`;
+                });
+
+                let config = { backgroundColor: 'white' };
+                viewer = $3Dmol.createViewer(viewerContainer, config);
+
+                viewer.addModel(xyz_data, "xyz");
+                viewer.setStyle({}, { stick: {}, sphere: { scale: 0.3 } });
+
+                const modelAtoms = viewer.getModel().selectedAtoms();
+                for (let i = 0; i < modelAtoms.length; i++) {
+                    if (i < atoms.length) {
+                        viewer.addLabel(`${atoms[i].charge.toFixed(4)}`, {
+                            position: modelAtoms[i],
+                            inFront: true,
+                            fontSize: 12,
+                            fontColor: 'black',
+                            backgroundColor: 'rgba(230, 230, 230, 0.7)',
+                            borderColor: 'grey',
+                            borderWidth: 0.5,
+                        });
+                    }
+                }
+
+                viewer.zoomTo();
+                viewer.render();
+            }
+        });
+    </script>
+</body>
+</html>
+
+
